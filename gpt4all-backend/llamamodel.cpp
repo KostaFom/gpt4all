@@ -25,6 +25,7 @@
 
 using namespace std::string_literals;
 
+
 // Maximum supported GGUF version
 static constexpr int GGUF_VER_MAX = 3;
 
@@ -533,6 +534,44 @@ bool LLamaModel::usingGPUDevice()
 #else
     return false;
 #endif
+}
+
+std::vector<float> LLamaModel::embedding(const std::string &text)
+{
+    const int overlap = 32;
+    const LLModel::Token clsToken = 101;
+    const size_t contextLength = llama_n_ctx(d_ptr->ctx);
+    typedef std::vector<LLModel::Token> TokenString;
+    TokenString tokens = ::bert_tokenize(d_ptr->ctx, text.c_str());
+    std::vector<double> embeddingsSum(bert_n_embd(d_ptr->ctx), 0);
+    int embeddingsSumTotal = 0;
+    size_t start_pos = 0;
+    bool isFirstChunk = true;
+    while (start_pos < tokens.size()) {
+        TokenString chunk;
+        if (!isFirstChunk)
+            chunk.push_back(clsToken);
+        const size_t l = isFirstChunk ? contextLength : contextLength - 1;
+        if (tokens.size() - start_pos > l) {
+            chunk.insert(chunk.end(), tokens.begin() + start_pos, tokens.begin() + start_pos + l);
+            start_pos = start_pos + contextLength - overlap;
+        } else {
+            chunk.insert(chunk.end(), tokens.begin() + start_pos, tokens.end());
+            start_pos = tokens.size();
+        }
+        embeddingsSumTotal++;
+        std::vector<float> embeddings(bert_n_embd(d_ptr->ctx));
+        bert_eval(d_ptr->ctx, d_ptr->n_threads, chunk.data(), chunk.size(), embeddings.data());
+        std::transform(embeddingsSum.begin(), embeddingsSum.end(), embeddings.begin(), embeddingsSum.begin(), std::plus<float>());
+        isFirstChunk = false;
+    }
+
+    std::transform(embeddingsSum.begin(), embeddingsSum.end(), embeddingsSum.begin(), [embeddingsSumTotal](float num){ return num / embeddingsSumTotal; });
+    double magnitude = std::sqrt(std::inner_product(embeddingsSum.begin(), embeddingsSum.end(), embeddingsSum.begin(), 0.0));
+    for (auto &value : embeddingsSum)
+        value /= magnitude;
+    std::vector<float> finalEmbeddings(embeddingsSum.begin(), embeddingsSum.end());
+    return finalEmbeddings;
 }
 
 #if defined(_WIN32)
