@@ -536,14 +536,32 @@ bool LLamaModel::usingGPUDevice()
 #endif
 }
 
-std::vector<float> LLamaModel::embedding(const std::string &text)
+std::vector<float> LLamaModel::embedding(const std::vector<std::string> &prompts)
 {
-    const int overlap = 32;
-    const LLModel::Token clsToken = 101;
-    const size_t contextLength = llama_n_ctx(d_ptr->ctx);
     typedef std::vector<LLModel::Token> TokenString;
-    TokenString tokens = ::bert_tokenize(d_ptr->ctx, text.c_str());
-    std::vector<double> embeddingsSum(bert_n_embd(d_ptr->ctx), 0);
+
+    // TODO: if the prompts are smaller than n_ctx, we batch. if the prompts are larger than n_batch, we split.
+
+    // tokenize the prompts and trim
+    std::vector<TokenString> inputs;
+    for (const auto &prompt: prompts) {
+        TokenString inp(text.length()+4);
+        int32_t n_tokens = llama_tokenize(d_ptr->model, text.c_str(), text.length(), inp.data(), inp.size(), true, false);
+        inp.resize(n_tokens);
+        inputs.push_back(inp);
+    }
+
+    const uint32_t n_batch = llama_n_batch(d_ptr->ctx);
+
+    // if all of the prompts are smaller than n_batch, use batching
+    if (std::find_if(inputs.begin(), inputs.end(), [](auto x){ return x.length() > n_batch; }) == inputs.end()) {
+    }
+
+    constexpr int overlap = 32;
+    constexpr LLModel::Token clsToken = 101;
+    const size_t contextLength = llama_n_ctx(d_ptr->ctx);
+
+    std::vector<double> embeddingsSum(llama_n_embd(d_ptr->model), 0);
     int embeddingsSumTotal = 0;
     size_t start_pos = 0;
     bool isFirstChunk = true;
@@ -559,9 +577,13 @@ std::vector<float> LLamaModel::embedding(const std::string &text)
             chunk.insert(chunk.end(), tokens.begin() + start_pos, tokens.end());
             start_pos = tokens.size();
         }
+
         embeddingsSumTotal++;
-        std::vector<float> embeddings(bert_n_embd(d_ptr->ctx));
-        bert_eval(d_ptr->ctx, d_ptr->n_threads, chunk.data(), chunk.size(), embeddings.data());
+        std::vector<float> embeddings(llama_n_embd(d_ptr->model));
+
+        // TODO: llama_decode stuff from embedding.cpp
+        bert_eval(d_ptr->ctx, chunk.data(), chunk.size(), embeddings.data());
+
         std::transform(embeddingsSum.begin(), embeddingsSum.end(), embeddings.begin(), embeddingsSum.begin(), std::plus<float>());
         isFirstChunk = false;
     }
