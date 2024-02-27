@@ -542,22 +542,76 @@ std::vector<float> LLamaModel::embedding(const std::vector<std::string> &prompts
 
     // TODO: if the prompts are smaller than n_ctx, we batch. if the prompts are larger than n_batch, we split.
 
-    // tokenize the prompts and trim
+    // tokenize the prompts
     std::vector<TokenString> inputs;
     for (const auto &prompt: prompts) {
         TokenString inp(text.length()+4);
-        int32_t n_tokens = llama_tokenize(d_ptr->model, text.c_str(), text.length(), inp.data(), inp.size(), true, false);
-        inp.resize(n_tokens);
+        int32_t n_tokens = llama_tokenize(d_ptr->model, text.c_str(), text.length(), inp.data(), inp.size(), false, false);
+        assert(eos_token == -1 || inp[n_tokens - 1] == eos_token);
+        inp.resize(n_tokens - 1); // erase EOS/SEP
         inputs.push_back(inp);
     }
 
     const uint32_t n_batch = llama_n_batch(d_ptr->ctx);
+    const uint32_t max_len = n_batch - 2; // minus BOS/CLS and EOS/SEP
+    const llama_token bos_token = llama_token_bos(d_ptr->model);
+    const llama_token eos_token = llama_token_eos(d_ptr->model);
+    constexpr int overlap = 32;
+    assert(overlap < n_batch);
 
-    // if all of the prompts are smaller than n_batch, use batching
-    if (std::find_if(inputs.begin(), inputs.end(), [](auto x){ return x.length() > n_batch; }) == inputs.end()) {
+    // split into max_len-sized chunks
+    struct split_batch { int idx; TokenString batch; };
+    std::vector<split_batch> batches;
+    for (int i = 0; i < inputs.size(); i++) {
+        auto &input = inputs[i];
+        for (auto it = inputs.begin(); it < input.end(); it += max_len) {
+            if (it > inputs.begin()) it -= overlap;
+            auto end = std::min(it + max_len, input.end());
+            auto &batch = batches.emplace_back(i, {{bos_token}});
+            batch.insert(batch.end(), start, end);
+            batch.push_back(eos_token);
+        }
+    }
+    inputs.clear();
+
+    // initialize batch
+    struct llama_batch batch = llama_batch_init(n_batch, 0, batches.size());
+
+    // allocate output
+    const int32_t n_embd = llama_n_embd(d_ptr->model);
+    // n_prompts x n_embd matrix
+    std::vector<double> embeddingsSum(prompts.size() * n_embd);
+    std::vector<float> embeddings;
+    std::vector<int> embeddingsSumTotal(prompts.size());
+
+    // break into batches
+    std::vector<int> queued_indices; // prompt indices of batches to be processed
+    for (auto &inp: batches) {
+        // encode if at capacity
+        if (batch.n_tokens + inp.batch.size() > n_batch) {
+            embeddings.resize(queued_indices.size() * n_embd);
+            batch_decode(ctx, batch, embeddings.data(), s, embeddings.size());
+            llama_batch_clear(batch);
+
+            for (int i = 0; i < queued_indices.size(); ++i) {
+                auto prompt_idx = queued_indices[i];
+                auto * start = &embeddingsSum[prompt_idx * n_embd];
+                std::transform(start, start + n_embd, &embeddings[i], start, std::plus<float>());
+            }
+
+            queued_indices.clear();
+        }
+
+        // add to batch
+        batch_add_seq(batch, inp.batch, queued_indices.size());
+        queued_indices.push_back(inp.idx);
     }
 
-    constexpr int overlap = 32;
+    // TODO: final batch
+
+
+
+
     constexpr LLModel::Token clsToken = 101;
     const size_t contextLength = llama_n_ctx(d_ptr->ctx);
 
