@@ -560,7 +560,11 @@ static void batch_add_seq(llama_batch &batch, const std::vector<LLModel::Token> 
     }
 }
 
-std::vector<float> LLamaModel::embedding(const std::vector<std::string> &prompts)
+size_t LLamaModel::embeddingSize() const {
+    return llama_n_embd(d_ptr->model);
+}
+
+bool LLamaModel::embed(const std::vector<std::string> &prompts, float *embeddings)
 {
     typedef std::vector<LLModel::Token> TokenString;
 
@@ -600,7 +604,6 @@ std::vector<float> LLamaModel::embedding(const std::vector<std::string> &prompts
     // initialize batch
     struct llama_batch batch = llama_batch_init(n_batch, 0, batches.size());
 
-    // allocate output
     const int32_t n_embd = llama_n_embd(d_ptr->model);
     // n_prompts x n_embd matrix
     std::vector<double> embeddingsSum(prompts.size() * n_embd);
@@ -612,7 +615,8 @@ std::vector<float> LLamaModel::embedding(const std::vector<std::string> &prompts
         llama_kv_cache_clear(d_ptr->ctx);
 
         if (llama_decode(d_ptr->ctx, batch) < 0) {
-            throw std::runtime_error(__func__ + ": llama_decode failed"s);
+            std::cerr << __func__ << ": llama_decode failed\n";
+            return false;
         }
 
         for (unsigned i = 0; i < queued_indices.size(); ++i) {
@@ -622,13 +626,15 @@ std::vector<float> LLamaModel::embedding(const std::vector<std::string> &prompts
             std::transform(out, out + n_embd, emb, out, std::plus<float>());
             embeddingsSumTotal[i_prompt]++;
         }
+
+        return true;
     };
 
     // break into batches
     for (auto &inp: batches) {
         // encode if at capacity
         if (batch.n_tokens + inp.batch.size() > n_batch) {
-            decode();
+            if (!decode()) { return false; }
             batch.n_tokens = 0;
             queued_indices.clear();
         }
@@ -639,9 +645,8 @@ std::vector<float> LLamaModel::embedding(const std::vector<std::string> &prompts
     }
 
     // final batch
-    decode();
+    if (!decode()) { return false; }
 
-    std::vector<float> finalEmbeddings;
     for (unsigned i = 0; i < prompts.size(); i++) {
         auto *embd = &embeddingsSum[i * n_embd];
         auto *embd_end = embd + n_embd;
@@ -653,10 +658,11 @@ std::vector<float> LLamaModel::embedding(const std::vector<std::string> &prompts
         // L2 norm
         double magnitude = std::sqrt(std::inner_product(embd, embd_end, embd, 0.0));
         std::transform(embd, embd_end, embd, [magnitude](float f){ return f / magnitude; });
-        finalEmbeddings.insert(finalEmbeddings.end(), embd, embd_end);
+        memcpy(embeddings, embd, n_embd);
+        embeddings += n_embd;
     }
 
-    return finalEmbeddings;
+    return true;
 }
 
 #if defined(_WIN32)
