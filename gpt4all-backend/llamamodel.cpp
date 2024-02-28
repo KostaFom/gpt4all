@@ -568,6 +568,9 @@ bool LLamaModel::embed(const std::vector<std::string> &prompts, float *embedding
 {
     typedef std::vector<LLModel::Token> TokenString;
 
+    const llama_token bos_token = llama_token_bos(d_ptr->model);
+    const llama_token eos_token = llama_token_eos(d_ptr->model);
+
     // tokenize the prompts
     std::vector<TokenString> inputs;
     for (const auto &prompt: prompts) {
@@ -580,8 +583,6 @@ bool LLamaModel::embed(const std::vector<std::string> &prompts, float *embedding
 
     const uint32_t n_batch = llama_n_batch(d_ptr->ctx);
     const uint32_t max_len = n_batch - 2; // minus BOS/CLS and EOS/SEP
-    const llama_token bos_token = llama_token_bos(d_ptr->model);
-    const llama_token eos_token = llama_token_eos(d_ptr->model);
     constexpr int overlap = 32;
     assert(overlap < n_batch);
 
