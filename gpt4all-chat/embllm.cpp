@@ -52,6 +52,8 @@ bool EmbeddingLLMWorker::loadModel()
     }
 
     m_model = LLModel::Implementation::construct(filePath.toStdString());
+    // NOTE: explicitly loads model on CPU to avoid GPU OOM
+    // TODO(cebtenzzre): support GPU-accelerated embeddings
     bool success = m_model->loadModel(filePath.toStdString(), 2048, 0);
     if (!success) {
         qWarning() << "WARNING: Could not load sbert";
