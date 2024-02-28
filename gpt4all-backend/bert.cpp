@@ -764,6 +764,7 @@ int32_t Bert::threadCount() const
     return d_ptr->n_threads;
 }
 
+#if 0
 std::vector<float> Bert::embedding(const std::string &text)
 {
     const int overlap = 32;
@@ -813,6 +814,7 @@ std::vector<float> Bert::embedding(const std::string &text)
     std::vector<float> finalEmbeddings(embeddingsSum.begin(), embeddingsSum.end());
     return finalEmbeddings;
 }
+#endif
 
 std::vector<LLModel::Token> Bert::tokenize(PromptContext &ctx, const std::string &str, bool special) const
 {

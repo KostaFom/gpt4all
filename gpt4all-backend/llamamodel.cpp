@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <initializer_list>
 #include <iomanip>
 #include <iostream>
 #include <map>
@@ -536,17 +537,38 @@ bool LLamaModel::usingGPUDevice()
 #endif
 }
 
+void llama_batch_add(
+                 struct llama_batch & batch,
+                        llama_token   id,
+                          llama_pos   pos,
+    const std::vector<llama_seq_id> & seq_ids,
+                               bool   logits) {
+    batch.token   [batch.n_tokens] = id;
+    batch.pos     [batch.n_tokens] = pos;
+    batch.n_seq_id[batch.n_tokens] = seq_ids.size();
+    for (size_t i = 0; i < seq_ids.size(); ++i) {
+        batch.seq_id[batch.n_tokens][i] = seq_ids[i];
+    }
+    batch.logits  [batch.n_tokens] = logits;
+
+    batch.n_tokens++;
+}
+
+static void batch_add_seq(llama_batch &batch, const std::vector<LLModel::Token> &tokens, int seq_id) {
+    for (unsigned i = 0; i < tokens.size(); i++) {
+        llama_batch_add(batch, tokens[i], i, { seq_id }, false);
+    }
+}
+
 std::vector<float> LLamaModel::embedding(const std::vector<std::string> &prompts)
 {
     typedef std::vector<LLModel::Token> TokenString;
 
-    // TODO: if the prompts are smaller than n_ctx, we batch. if the prompts are larger than n_batch, we split.
-
     // tokenize the prompts
     std::vector<TokenString> inputs;
     for (const auto &prompt: prompts) {
-        TokenString inp(text.length()+4);
-        int32_t n_tokens = llama_tokenize(d_ptr->model, text.c_str(), text.length(), inp.data(), inp.size(), false, false);
+        TokenString inp(prompt.length()+4);
+        int32_t n_tokens = llama_tokenize(d_ptr->model, prompt.c_str(), prompt.length(), inp.data(), inp.size(), false, false);
         assert(eos_token == -1 || inp[n_tokens - 1] == eos_token);
         inp.resize(n_tokens - 1); // erase EOS/SEP
         inputs.push_back(inp);
@@ -562,13 +584,14 @@ std::vector<float> LLamaModel::embedding(const std::vector<std::string> &prompts
     // split into max_len-sized chunks
     struct split_batch { int idx; TokenString batch; };
     std::vector<split_batch> batches;
-    for (int i = 0; i < inputs.size(); i++) {
+    for (unsigned i = 0; i < inputs.size(); i++) {
         auto &input = inputs[i];
-        for (auto it = inputs.begin(); it < input.end(); it += max_len) {
-            if (it > inputs.begin()) it -= overlap;
+        for (auto it = input.begin(); it < input.end(); it += max_len) {
+            if (it > input.begin()) it -= overlap;
             auto end = std::min(it + max_len, input.end());
-            auto &batch = batches.emplace_back(i, {{bos_token}});
-            batch.insert(batch.end(), start, end);
+            auto &batch = batches.emplace_back(i, TokenString()).batch;
+            batch.push_back(bos_token);
+            batch.insert(batch.end(), it, end);
             batch.push_back(eos_token);
         }
     }
@@ -581,24 +604,32 @@ std::vector<float> LLamaModel::embedding(const std::vector<std::string> &prompts
     const int32_t n_embd = llama_n_embd(d_ptr->model);
     // n_prompts x n_embd matrix
     std::vector<double> embeddingsSum(prompts.size() * n_embd);
-    std::vector<float> embeddings;
     std::vector<int> embeddingsSumTotal(prompts.size());
+    std::vector<int> queued_indices; // prompt indices of batches to be processed
+
+    auto decode = [this, &queued_indices, n_embd, &batch, &embeddingsSum, &embeddingsSumTotal]() {
+        // kv cache is irrelevant for embeddings
+        llama_kv_cache_clear(d_ptr->ctx);
+
+        if (llama_decode(d_ptr->ctx, batch) < 0) {
+            throw std::runtime_error(__func__ + ": llama_decode failed"s);
+        }
+
+        for (unsigned i = 0; i < queued_indices.size(); ++i) {
+            auto i_prompt = queued_indices[i];
+            auto *out = &embeddingsSum[i_prompt * n_embd];
+            float *emb = llama_get_embeddings_ith(d_ptr->ctx, i);
+            std::transform(out, out + n_embd, emb, out, std::plus<float>());
+            embeddingsSumTotal[i_prompt]++;
+        }
+    };
 
     // break into batches
-    std::vector<int> queued_indices; // prompt indices of batches to be processed
     for (auto &inp: batches) {
         // encode if at capacity
         if (batch.n_tokens + inp.batch.size() > n_batch) {
-            embeddings.resize(queued_indices.size() * n_embd);
-            batch_decode(ctx, batch, embeddings.data(), s, embeddings.size());
-            llama_batch_clear(batch);
-
-            for (int i = 0; i < queued_indices.size(); ++i) {
-                auto prompt_idx = queued_indices[i];
-                auto * start = &embeddingsSum[prompt_idx * n_embd];
-                std::transform(start, start + n_embd, &embeddings[i], start, std::plus<float>());
-            }
-
+            decode();
+            batch.n_tokens = 0;
             queued_indices.clear();
         }
 
@@ -607,46 +638,24 @@ std::vector<float> LLamaModel::embedding(const std::vector<std::string> &prompts
         queued_indices.push_back(inp.idx);
     }
 
-    // TODO: final batch
+    // final batch
+    decode();
 
+    std::vector<float> finalEmbeddings;
+    for (unsigned i = 0; i < prompts.size(); i++) {
+        auto *embd = &embeddingsSum[i * n_embd];
+        auto *embd_end = embd + n_embd;
+        int total = embeddingsSumTotal[i];
 
+        // average over chunks
+        std::transform(embd, embd_end, embd, [total](float f){ return f / total; });
 
-
-    constexpr LLModel::Token clsToken = 101;
-    const size_t contextLength = llama_n_ctx(d_ptr->ctx);
-
-    std::vector<double> embeddingsSum(llama_n_embd(d_ptr->model), 0);
-    int embeddingsSumTotal = 0;
-    size_t start_pos = 0;
-    bool isFirstChunk = true;
-    while (start_pos < tokens.size()) {
-        TokenString chunk;
-        if (!isFirstChunk)
-            chunk.push_back(clsToken);
-        const size_t l = isFirstChunk ? contextLength : contextLength - 1;
-        if (tokens.size() - start_pos > l) {
-            chunk.insert(chunk.end(), tokens.begin() + start_pos, tokens.begin() + start_pos + l);
-            start_pos = start_pos + contextLength - overlap;
-        } else {
-            chunk.insert(chunk.end(), tokens.begin() + start_pos, tokens.end());
-            start_pos = tokens.size();
-        }
-
-        embeddingsSumTotal++;
-        std::vector<float> embeddings(llama_n_embd(d_ptr->model));
-
-        // TODO: llama_decode stuff from embedding.cpp
-        bert_eval(d_ptr->ctx, chunk.data(), chunk.size(), embeddings.data());
-
-        std::transform(embeddingsSum.begin(), embeddingsSum.end(), embeddings.begin(), embeddingsSum.begin(), std::plus<float>());
-        isFirstChunk = false;
+        // L2 norm
+        double magnitude = std::sqrt(std::inner_product(embd, embd_end, embd, 0.0));
+        std::transform(embd, embd_end, embd, [magnitude](float f){ return f / magnitude; });
+        finalEmbeddings.insert(finalEmbeddings.end(), embd, embd_end);
     }
 
-    std::transform(embeddingsSum.begin(), embeddingsSum.end(), embeddingsSum.begin(), [embeddingsSumTotal](float num){ return num / embeddingsSumTotal; });
-    double magnitude = std::sqrt(std::inner_product(embeddingsSum.begin(), embeddingsSum.end(), embeddingsSum.begin(), 0.0));
-    for (auto &value : embeddingsSum)
-        value /= magnitude;
-    std::vector<float> finalEmbeddings(embeddingsSum.begin(), embeddingsSum.end());
     return finalEmbeddings;
 }
 

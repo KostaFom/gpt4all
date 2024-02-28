@@ -27,7 +27,7 @@ public:
     void setThreadCount(int32_t n_threads) override;
     int32_t threadCount() const override;
 
-    std::vector<float> embedding(const std::string &text) override;
+    //std::vector<float> embedding(const std::string &text) override;
 
 private:
     std::unique_ptr<BertPrivate> d_ptr;

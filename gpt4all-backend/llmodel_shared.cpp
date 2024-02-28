@@ -266,13 +266,3 @@ void LLModel::generateResponse(std::function<bool(int32_t, const std::string&)> 
         cachedTokens.clear();
     }
 }
-
-std::vector<float> LLModel::embedding(const std::string &text)
-{
-    (void)text;
-    if (!supportsCompletion()) {
-        std::string errorMessage = "ERROR: this model does not support generating embeddings!\n";
-        std::cerr << implementation().modelType() << errorMessage;
-    }
-    return std::vector<float>();
-}

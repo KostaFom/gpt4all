@@ -33,7 +33,7 @@ public:
     bool hasGPUDevice() override;
     bool usingGPUDevice() override;
 
-    std::vector<float> embedding(const std::string &text) override;
+    std::vector<float> embedding(const std::vector<std::string> &prompts) override;
 
 private:
     std::unique_ptr<LLamaPrivate> d_ptr;
