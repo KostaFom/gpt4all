@@ -146,6 +146,7 @@ public:
     explicit EmbeddingModels(QObject *parent);
     int count() const;
 
+    int defaultModelIndex() const;
     ModelInfo defaultModelInfo() const;
 
 Q_SIGNALS:
@@ -201,7 +202,7 @@ class ModelList : public QAbstractListModel
 {
     Q_OBJECT
     Q_PROPERTY(int count READ count NOTIFY countChanged)
-    Q_PROPERTY(int defaultEmbeddingModelIndex READ defaultEmbeddingModelIndex NOTIFY defaultEmbeddingModelIndexChanged)
+    Q_PROPERTY(int defaultEmbeddingModelIndex READ defaultEmbeddingModelIndex)
     Q_PROPERTY(EmbeddingModels* embeddingModels READ embeddingModels NOTIFY embeddingModelsChanged)
     Q_PROPERTY(InstalledModels* installedModels READ installedModels NOTIFY installedModelsChanged)
     Q_PROPERTY(DownloadableModels* downloadableModels READ downloadableModels NOTIFY downloadableModelsChanged)
@@ -353,7 +354,6 @@ Q_SIGNALS:
     void downloadableModelsChanged();
     void userDefaultModelListChanged();
     void asyncModelRequestOngoingChanged();
-    void defaultEmbeddingModelIndexChanged();
 
 private Q_SLOTS:
     void updateModelsFromJson();

@@ -9,7 +9,6 @@
 
 //#define USE_LOCAL_MODELSJSON
 
-#define DEFAULT_EMBEDDING_MODEL "all-MiniLM-L6-v2-f16.gguf"
 #define NOMIC_EMBEDDING_MODEL "nomic-embed-text-v1.txt"
 
 QString ModelInfo::id() const
@@ -123,6 +122,7 @@ void ModelInfo::setContextLength(int l)
 
 int ModelInfo::maxContextLength() const
 {
+    if (!installed || isOnline) return -1;
     if (m_maxContextLength != -1) return m_maxContextLength;
     auto path = (dirpath + filename()).toStdString();
     int layers = LLModel::Implementation::maxContextLength(path);
@@ -214,10 +214,21 @@ bool EmbeddingModels::filterAcceptsRow(int sourceRow,
                                        const QModelIndex &sourceParent) const
 {
     QModelIndex index = sourceModel()->index(sourceRow, 0, sourceParent);
-    bool isInstalled = sourceModel()->data(index, ModelList::InstalledRole).toBool();
-    bool isEmbedding = sourceModel()->data(index, ModelList::FilenameRole).toString() == DEFAULT_EMBEDDING_MODEL ||
-        sourceModel()->data(index, ModelList::FilenameRole).toString() == NOMIC_EMBEDDING_MODEL;
-    return isInstalled && isEmbedding;
+    if (!sourceModel()->data(index, ModelList::InstalledRole).toBool()) {
+        return false; // not installed
+    }
+    auto filename = sourceModel()->data(index, ModelList::FilenameRole).toString();
+    if (filename == NOMIC_EMBEDDING_MODEL) {
+        return true; // Nomic embedding API
+    }
+    if (!sourceModel()->data(index, ModelList::OnlineRole).toBool()) {
+        return false; // ChatGPT, etc.
+    }
+
+    // read GGUF and decide based on model architecture
+    auto dirpath = sourceModel()->data(index, ModelList::DirpathRole).toString();
+    auto path = (dirpath + filename).toStdString();
+    return LLModel::Implementation::isEmbeddingModel(path);
 }
 
 int EmbeddingModels::count() const
@@ -225,25 +236,32 @@ int EmbeddingModels::count() const
     return rowCount();
 }
 
-ModelInfo EmbeddingModels::defaultModelInfo() const
+int EmbeddingModels::defaultModelIndex() const
 {
-    if (!sourceModel())
-        return ModelInfo();
+    auto *sourceListModel = qobject_cast<const ModelList*>(sourceModel());
+    if (!sourceListModel) return -1;
 
-    const ModelList *sourceListModel = qobject_cast<const ModelList*>(sourceModel());
-    if (!sourceListModel)
-        return ModelInfo();
-
-    const int rows = sourceListModel->rowCount();
+    int rows = sourceListModel->rowCount();
     for (int i = 0; i < rows; ++i) {
-        QModelIndex sourceIndex = sourceListModel->index(i, 0);
-        if (filterAcceptsRow(i, sourceIndex.parent())) {
-            const QString id = sourceListModel->data(sourceIndex, ModelList::IdRole).toString();
-            return sourceListModel->modelInfo(id);
+        if (filterAcceptsRow(i, sourceListModel->index(i, 0).parent())) {
+            return i;
         }
     }
 
-    return ModelInfo();
+    return -1;
+}
+
+ModelInfo EmbeddingModels::defaultModelInfo() const
+{
+    auto *sourceListModel = qobject_cast<const ModelList*>(sourceModel());
+    if (!sourceListModel) return ModelInfo();
+
+    int i = defaultModelIndex();
+    if (i < 0) return ModelInfo();
+
+    QModelIndex sourceIndex = sourceListModel->index(i, 0);
+    auto id = sourceListModel->data(sourceIndex, ModelList::IdRole).toString();
+    return sourceListModel->modelInfo(id);
 }
 
 InstalledModels::InstalledModels(QObject *parent)
@@ -390,13 +408,7 @@ const QList<QString> ModelList::userDefaultModelList() const
 
 int ModelList::defaultEmbeddingModelIndex() const
 {
-    QMutexLocker locker(&m_mutex);
-    for (int i = 0; i < m_models.size(); ++i) {
-        const ModelInfo *info = m_models.at(i);
-        const bool isEmbedding = info->filename() == DEFAULT_EMBEDDING_MODEL;
-        if (isEmbedding) return i;
-    }
-    return -1;
+    return embeddingModels()->defaultModelIndex();
 }
 
 ModelInfo ModelList::defaultModelInfo() const
