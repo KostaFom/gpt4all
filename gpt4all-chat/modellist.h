@@ -34,6 +34,7 @@ struct ModelInfo {
     Q_PROPERTY(QString quant MEMBER quant)
     Q_PROPERTY(QString type MEMBER type)
     Q_PROPERTY(bool isClone MEMBER isClone)
+    Q_PROPERTY(bool isEmbeddingModel MEMBER isEmbeddingModel)
     Q_PROPERTY(double temperature READ temperature WRITE setTemperature)
     Q_PROPERTY(double topP READ topP WRITE setTopP)
     Q_PROPERTY(double minP READ minP WRITE setMinP)
@@ -84,6 +85,7 @@ public:
     QString quant;
     QString type;
     bool isClone = false;
+    bool isEmbeddingModel = false;
 
     bool operator==(const ModelInfo &other) const {
         return  m_id == other.m_id;
@@ -160,13 +162,12 @@ private:
     bool m_requireInstalled;
 };
 
-class InstalledModels : public QSortFilterProxyModel
+class InstalledModels : public EmbeddingModels
 {
     Q_OBJECT
     Q_PROPERTY(int count READ count NOTIFY countChanged)
 public:
     explicit InstalledModels(QObject *parent);
-    int count() const;
 
 Q_SIGNALS:
     void countChanged();
@@ -244,6 +245,7 @@ public:
         QuantRole,
         TypeRole,
         IsCloneRole,
+        IsEmbeddingModelRole,
         TemperatureRole,
         TopPRole,
         TopKRole,
@@ -289,6 +291,7 @@ public:
         roles[QuantRole] = "quant";
         roles[TypeRole] = "type";
         roles[IsCloneRole] = "isClone";
+        roles[IsEmbeddingModelRole] = "isEmbeddingModel";
         roles[TemperatureRole] = "temperature";
         roles[TopPRole] = "topP";
         roles[MinPRole] = "minP";

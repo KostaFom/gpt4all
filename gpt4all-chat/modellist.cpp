@@ -216,19 +216,10 @@ bool EmbeddingModels::filterAcceptsRow(int sourceRow,
                                        const QModelIndex &sourceParent) const
 {
     QModelIndex index = sourceModel()->index(sourceRow, 0, sourceParent);
-    auto filename = sourceModel()->data(index, ModelList::FilenameRole).toString();
+    bool isEmbeddingModel = sourceModel()->data(index, ModelList::IsEmbeddingModelRole).toBool();
     bool installed = sourceModel()->data(index, ModelList::InstalledRole).toBool();
-    if (filename == NOMIC_EMBEDDING_MODEL && (!m_requireInstalled || installed)) {
-        return true; // Nomic embedding API
-    }
-    if (!installed || sourceModel()->data(index, ModelList::OnlineRole).toBool()) {
-        return false; // can only check installed offline models
-    }
-
-    // read GGUF and decide based on model architecture
-    auto dirpath = sourceModel()->data(index, ModelList::DirpathRole).toString();
-    auto path = (dirpath + filename).toStdString();
-    return LLModel::Implementation::isEmbeddingModel(path);
+    auto filename = sourceModel()->data(index, ModelList::FilenameRole).toString();
+    return isEmbeddingModel && (!m_requireInstalled || installed);
 }
 
 int EmbeddingModels::count() const
@@ -265,26 +256,18 @@ ModelInfo EmbeddingModels::defaultModelInfo() const
 }
 
 InstalledModels::InstalledModels(QObject *parent)
-    : QSortFilterProxyModel(parent)
-{
-    connect(this, &InstalledModels::rowsInserted, this, &InstalledModels::countChanged);
-    connect(this, &InstalledModels::rowsRemoved, this, &InstalledModels::countChanged);
-    connect(this, &InstalledModels::modelReset, this, &InstalledModels::countChanged);
-    connect(this, &InstalledModels::layoutChanged, this, &InstalledModels::countChanged);
-}
+    : EmbeddingModels(parent, false) {}
 
 bool InstalledModels::filterAcceptsRow(int sourceRow,
                                        const QModelIndex &sourceParent) const
 {
+    if (EmbeddingModels::filterAcceptsRow(sourceRow, sourceParent)) {
+        return false; // don't let user select embedding models
+    }
     QModelIndex index = sourceModel()->index(sourceRow, 0, sourceParent);
     bool isInstalled = sourceModel()->data(index, ModelList::InstalledRole).toBool();
     bool showInGUI = !sourceModel()->data(index, ModelList::DisableGUIRole).toBool();
     return isInstalled && showInGUI;
-}
-
-int InstalledModels::count() const
-{
-    return rowCount();
 }
 
 DownloadableModels::DownloadableModels(QObject *parent)
@@ -343,6 +326,7 @@ ModelList::ModelList()
 {
     m_embeddingModels->setSourceModel(this);
     m_installedModels->setSourceModel(this);
+    m_installedEmbeddingModels->setSourceModel(this);
     m_downloadableModels->setSourceModel(this);
 
     connect(MySettings::globalInstance(), &MySettings::modelPathChanged, this, &ModelList::updateModelsFromDirectory);
@@ -391,10 +375,13 @@ const QList<QString> ModelList::userDefaultModelList() const
     QList<QString> models;
     bool foundUserDefault = false;
     for (ModelInfo *info : m_models) {
-        if (info->installed && info->id() == userDefaultModelName) {
+        if (!info->installed || info->isEmbeddingModel) {
+            continue;
+        }
+        if (info->id() == userDefaultModelName) {
             foundUserDefault = true;
             models.prepend(info->name());
-        } else if (info->installed) {
+        } else {
             models.append(info->name());
         }
     }
@@ -592,6 +579,8 @@ QVariant ModelList::dataInternal(const ModelInfo *info, int role) const
             return info->type;
         case IsCloneRole:
             return info->isClone;
+        case IsEmbeddingModelRole:
+            return info->isEmbeddingModel;
         case TemperatureRole:
             return info->temperature();
         case TopPRole:
@@ -723,6 +712,20 @@ void ModelList::updateData(const QString &id, int role, const QVariant &value)
             info->type = value.toString(); break;
         case IsCloneRole:
             info->isClone = value.toBool(); break;
+        case IsEmbeddingModelRole: {
+            (void)value;
+            auto filename = info->filename();
+            if (filename == NOMIC_EMBEDDING_MODEL) {
+                info->isEmbeddingModel = true; // Nomic embedding API
+            } else if (!info->installed || info->isOnline) {
+                info->isEmbeddingModel = false; // can only check installed offline models
+            } else {
+                // read GGUF and decide based on model architecture
+                auto path = (info->dirpath + filename).toStdString();
+                info->isEmbeddingModel = LLModel::Implementation::isEmbeddingModel(path);
+            }
+            break;
+        }
         case TemperatureRole:
             info->setTemperature(value.toDouble()); break;
         case TopPRole:
@@ -783,8 +786,10 @@ void ModelList::updateDataByFilename(const QString &filename, int role, const QV
         return;
     }
 
-    for (const QString &id : modelsById)
-        updateData(id, role, value);;
+    for (const QString &id : modelsById) {
+        updateData(id, role, value);
+        updateData(id, IsEmbeddingModelRole, {});
+    }
 }
 
 ModelInfo ModelList::modelInfo(const QString &id) const
@@ -836,6 +841,7 @@ QString ModelList::clone(const ModelInfo &model)
     updateData(id, ModelList::RepeatPenaltyTokensRole, model.repeatPenaltyTokens());
     updateData(id, ModelList::PromptTemplateRole, model.promptTemplate());
     updateData(id, ModelList::SystemPromptRole, model.systemPrompt());
+    updateData(id, ModelList::IsEmbeddingModelRole, {});
     return id;
 }
 
@@ -945,9 +951,10 @@ void ModelList::updateModelsFromDirectory()
                     for (const QString &id : modelsById) {
                         updateData(id, FilenameRole, filename);
                         // FIXME: WE should change this to use a consistent filename for online models
-                        updateData(id, OnlineRole, filename.startsWith("chatgpt-") || filename.startsWith("nomic-"));
+                        updateData(id, OnlineRole, filename.endsWith(".txt"));
                         updateData(id, DirpathRole, info.dir().absolutePath() + "/");
                         updateData(id, FilesizeRole, toFileSize(info.size()));
+                        updateData(id, IsEmbeddingModelRole, {});
                     }
                 }
             }
@@ -1190,6 +1197,7 @@ void ModelList::parseModelsJsonFile(const QByteArray &jsonData, bool save)
             updateData(id, ModelList::PromptTemplateRole, obj["promptTemplate"].toString());
         if (obj.contains("systemPrompt"))
             updateData(id, ModelList::SystemPromptRole, obj["systemPrompt"].toString());
+        updateData(id, ModelList::IsEmbeddingModelRole, {});
     }
 
     const QString chatGPTDesc = tr("<ul><li>Requires personal OpenAI API key.</li><li>WARNING: Will send"
@@ -1217,6 +1225,7 @@ void ModelList::parseModelsJsonFile(const QByteArray &jsonData, bool save)
         updateData(id, ModelList::ParametersRole, "?");
         updateData(id, ModelList::QuantRole, "NA");
         updateData(id, ModelList::TypeRole, "GPT");
+        updateData(id, ModelList::IsEmbeddingModelRole, {});
     }
 
     {
@@ -1241,6 +1250,7 @@ void ModelList::parseModelsJsonFile(const QByteArray &jsonData, bool save)
         updateData(id, ModelList::ParametersRole, "?");
         updateData(id, ModelList::QuantRole, "NA");
         updateData(id, ModelList::TypeRole, "GPT");
+        updateData(id, ModelList::IsEmbeddingModelRole, {});
     }
 
     {
@@ -1269,6 +1279,7 @@ void ModelList::parseModelsJsonFile(const QByteArray &jsonData, bool save)
         updateData(id, ModelList::ParametersRole, "?");
         updateData(id, ModelList::QuantRole, "NA");
         updateData(id, ModelList::TypeRole, "Bert");
+        updateData(id, ModelList::IsEmbeddingModelRole, {});
     }
 }
 
@@ -1333,5 +1344,6 @@ void ModelList::updateModelsFromSettings()
         updateData(id, ModelList::RepeatPenaltyTokensRole, repeatPenaltyTokens);
         updateData(id, ModelList::PromptTemplateRole, promptTemplate);
         updateData(id, ModelList::SystemPromptRole, systemPrompt);
+        updateData(id, ModelList::IsEmbeddingModelRole, {});
     }
 }
