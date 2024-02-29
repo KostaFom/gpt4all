@@ -27,7 +27,7 @@ void EmbeddingLLMWorker::wait()
 
 bool EmbeddingLLMWorker::loadModel()
 {
-    const EmbeddingModels *embeddingModels = ModelList::globalInstance()->embeddingModels();
+    const EmbeddingModels *embeddingModels = ModelList::globalInstance()->installedEmbeddingModels();
     if (!embeddingModels->count())
         return false;
 

@@ -201,9 +201,11 @@ void ModelInfo::setSystemPrompt(const QString &p)
     m_systemPrompt = p;
 }
 
-EmbeddingModels::EmbeddingModels(QObject *parent)
+EmbeddingModels::EmbeddingModels(QObject *parent, bool requireInstalled)
     : QSortFilterProxyModel(parent)
 {
+    m_requireInstalled = requireInstalled;
+
     connect(this, &EmbeddingModels::rowsInserted, this, &EmbeddingModels::countChanged);
     connect(this, &EmbeddingModels::rowsRemoved, this, &EmbeddingModels::countChanged);
     connect(this, &EmbeddingModels::modelReset, this, &EmbeddingModels::countChanged);
@@ -214,15 +216,13 @@ bool EmbeddingModels::filterAcceptsRow(int sourceRow,
                                        const QModelIndex &sourceParent) const
 {
     QModelIndex index = sourceModel()->index(sourceRow, 0, sourceParent);
-    if (!sourceModel()->data(index, ModelList::InstalledRole).toBool()) {
-        return false; // not installed
-    }
     auto filename = sourceModel()->data(index, ModelList::FilenameRole).toString();
-    if (filename == NOMIC_EMBEDDING_MODEL) {
+    bool installed = sourceModel()->data(index, ModelList::InstalledRole).toBool();
+    if (filename == NOMIC_EMBEDDING_MODEL && (!m_requireInstalled || installed)) {
         return true; // Nomic embedding API
     }
-    if (!sourceModel()->data(index, ModelList::OnlineRole).toBool()) {
-        return false; // ChatGPT, etc.
+    if (!installed || sourceModel()->data(index, ModelList::OnlineRole).toBool()) {
+        return false; // can only check installed offline models
     }
 
     // read GGUF and decide based on model architecture
@@ -335,8 +335,9 @@ ModelList *ModelList::globalInstance()
 
 ModelList::ModelList()
     : QAbstractListModel(nullptr)
-    , m_embeddingModels(new EmbeddingModels(this))
+    , m_embeddingModels(new EmbeddingModels(this, false))
     , m_installedModels(new InstalledModels(this))
+    , m_installedEmbeddingModels(new EmbeddingModels(this, true))
     , m_downloadableModels(new DownloadableModels(this))
     , m_asyncModelRequestOngoing(false)
 {
