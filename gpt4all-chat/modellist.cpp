@@ -393,7 +393,8 @@ bool DownloadableModels::filterAcceptsRow(int sourceRow,
     bool isDownloadable = !sourceModel()->data(index, ModelList::DescriptionRole).toString().isEmpty();
     bool isInstalled = !sourceModel()->data(index, ModelList::InstalledRole).toString().isEmpty();
     bool isIncomplete = !sourceModel()->data(index, ModelList::IncompleteRole).toString().isEmpty();
-    return withinLimit && (isDownloadable || isInstalled || isIncomplete);
+    bool isClone = sourceModel()->data(index, ModelList::IsCloneRole).toBool();
+    return withinLimit && !isClone && (isDownloadable || isInstalled || isIncomplete);
 }
 
 int DownloadableModels::count() const
@@ -492,10 +493,15 @@ const QList<QString> ModelList::userDefaultModelList() const
     QList<QString> models;
     bool foundUserDefault = false;
     for (ModelInfo *info : m_models) {
-        if (info->installed && info->id() == userDefaultModelName) {
+
+        // Only installed models that are meant for GUI are suitable as a default
+        if (!info->installed || info->disableGUI)
+            continue;
+
+        if (info->id() == userDefaultModelName) {
             foundUserDefault = true;
             models.prepend(info->name());
-        } else if (info->installed) {
+        } else {
             models.append(info->name());
         }
     }
@@ -785,13 +791,6 @@ QVariant ModelList::data(const QModelIndex &index, int role) const
     return dataInternal(info, role);
 }
 
-void ModelList::updateData(const QString &id, int role, const QVariant &value)
-{
-    QVector<QPair<int, QVariant>> data;
-    data.append(qMakePair(role, value));
-    updateData(id, data);
-}
-
 void ModelList::updateData(const QString &id, const QVector<QPair<int, QVariant>> &data)
 {
     int index;
@@ -809,12 +808,22 @@ void ModelList::updateData(const QString &id, const QVector<QPair<int, QVariant>
             return;
         }
 
+        // We only sort when one of the fields used by the sorting algorithm actually changes that
+        // is implicated or used by the sorting algorithm
+        bool shouldSort = false;
+
         for (const auto &d : data) {
             const int role = d.first;
             const QVariant value = d.second;
             switch (role) {
             case IdRole:
-                info->setId(value.toString()); break;
+                {
+                    if (info->id() != value.toString()) {
+                        info->setId(value.toString());
+                        shouldSort = true;
+                    }
+                    break;
+                }
             case NameRole:
                 info->setName(value.toString()); break;
             case FilenameRole:
@@ -860,7 +869,13 @@ void ModelList::updateData(const QString &id, const QVector<QPair<int, QVariant>
             case DownloadErrorRole:
                 info->downloadError = value.toString(); break;
             case OrderRole:
-                info->order = value.toString(); break;
+                {
+                    if (info->order != value.toString()) {
+                        info->order = value.toString();
+                        shouldSort = true;
+                    }
+                    break;
+                }
             case RamrequiredRole:
                 info->ramrequired = value.toInt(); break;
             case ParametersRole:
@@ -870,9 +885,21 @@ void ModelList::updateData(const QString &id, const QVector<QPair<int, QVariant>
             case TypeRole:
                 info->setType(value.toString()); break;
             case IsCloneRole:
-                info->setIsClone(value.toBool()); break;
+                {
+                    if (info->isClone() != value.toBool()) {
+                        info->setIsClone(value.toBool());
+                        shouldSort = true;
+                    }
+                    break;
+                }
             case IsDiscoveredRole:
-                info->setIsDiscovered(value.toBool()); break;
+                {
+                    if (info->isDiscovered() != value.toBool()) {
+                        info->setIsDiscovered(value.toBool());
+                        shouldSort = true;
+                    }
+                    break;
+                }
             case TemperatureRole:
                 info->setTemperature(value.toDouble()); break;
             case TopPRole:
@@ -898,11 +925,29 @@ void ModelList::updateData(const QString &id, const QVector<QPair<int, QVariant>
             case SystemPromptRole:
                 info->setSystemPrompt(value.toString()); break;
             case LikesRole:
-                info->setLikes(value.toInt()); break;
+                {
+                    if (info->likes() != value.toInt()) {
+                        info->setLikes(value.toInt());
+                        shouldSort = true;
+                    }
+                    break;
+                }
             case DownloadsRole:
-                info->setDownloads(value.toInt()); break;
+                {
+                    if (info->downloads() != value.toInt()) {
+                        info->setDownloads(value.toInt());
+                        shouldSort = true;
+                    }
+                    break;
+                }
             case RecencyRole:
-                info->setRecency(value.toDateTime()); break;
+                {
+                    if (info->recency() != value.toDateTime()) {
+                        info->setRecency(value.toDateTime());
+                        shouldSort = true;
+                    }
+                    break;
+                }
             }
         }
 
@@ -912,11 +957,13 @@ void ModelList::updateData(const QString &id, const QVector<QPair<int, QVariant>
         const QFileInfo incompleteInfo(incompleteDownloadPath(info->filename()));
         info->isIncomplete = incompleteInfo.exists();
 
-        auto s = m_discoverSort;
-        auto d = m_discoverSortDirection;
-        std::stable_sort(m_models.begin(), m_models.end(), [s, d](const ModelInfo* lhs, const ModelInfo* rhs) {
-            return ModelList::lessThan(lhs, rhs, s, d);
-        });
+        if (shouldSort) {
+            auto s = m_discoverSort;
+            auto d = m_discoverSortDirection;
+            std::stable_sort(m_models.begin(), m_models.end(), [s, d](const ModelInfo* lhs, const ModelInfo* rhs) {
+                return ModelList::lessThan(lhs, rhs, s, d);
+            });
+        }
     }
     emit dataChanged(createIndex(index, 0), createIndex(index, 0));
     emit userDefaultModelListChanged();
@@ -936,7 +983,7 @@ void ModelList::resortModel()
     emit layoutChanged();
 }
 
-void ModelList::updateDataByFilename(const QString &filename, int role, const QVariant &value)
+void ModelList::updateDataByFilename(const QString &filename, const QVector<QPair<int, QVariant>> &data)
 {
     QVector<QString> modelsById;
     {
@@ -952,7 +999,7 @@ void ModelList::updateDataByFilename(const QString &filename, int role, const QV
     }
 
     for (const QString &id : modelsById)
-        updateData(id, role, value);;
+        updateData(id, data);
 }
 
 ModelInfo ModelList::modelInfo(const QString &id) const
@@ -986,24 +1033,28 @@ QString ModelList::clone(const ModelInfo &model)
 {
     const QString id = Network::globalInstance()->generateUniqueId();
     addModel(id);
-    updateData(id, ModelList::IsCloneRole, true);
-    updateData(id, ModelList::NameRole, uniqueModelName(model));
-    updateData(id, ModelList::FilenameRole, model.filename());
-    updateData(id, ModelList::DirpathRole, model.dirpath);
-    updateData(id, ModelList::InstalledRole, model.installed);
-    updateData(id, ModelList::OnlineRole, model.isOnline);
-    updateData(id, ModelList::TemperatureRole, model.temperature());
-    updateData(id, ModelList::TopPRole, model.topP());
-    updateData(id, ModelList::MinPRole, model.minP());
-    updateData(id, ModelList::TopKRole, model.topK());
-    updateData(id, ModelList::MaxLengthRole, model.maxLength());
-    updateData(id, ModelList::PromptBatchSizeRole, model.promptBatchSize());
-    updateData(id, ModelList::ContextLengthRole, model.contextLength());
-    updateData(id, ModelList::GpuLayersRole, model.gpuLayers());
-    updateData(id, ModelList::RepeatPenaltyRole, model.repeatPenalty());
-    updateData(id, ModelList::RepeatPenaltyTokensRole, model.repeatPenaltyTokens());
-    updateData(id, ModelList::PromptTemplateRole, model.promptTemplate());
-    updateData(id, ModelList::SystemPromptRole, model.systemPrompt());
+
+    QVector<QPair<int, QVariant>> data {
+        { ModelList::InstalledRole, model.installed },
+        { ModelList::IsCloneRole, true },
+        { ModelList::NameRole, uniqueModelName(model) },
+        { ModelList::FilenameRole, model.filename() },
+        { ModelList::DirpathRole, model.dirpath },
+        { ModelList::OnlineRole, model.isOnline },
+        { ModelList::TemperatureRole, model.temperature() },
+        { ModelList::TopPRole, model.topP() },
+        { ModelList::MinPRole, model.minP() },
+        { ModelList::TopKRole, model.topK() },
+        { ModelList::MaxLengthRole, model.maxLength() },
+        { ModelList::PromptBatchSizeRole, model.promptBatchSize() },
+        { ModelList::ContextLengthRole, model.contextLength() },
+        { ModelList::GpuLayersRole, model.gpuLayers() },
+        { ModelList::RepeatPenaltyRole, model.repeatPenalty() },
+        { ModelList::RepeatPenaltyTokensRole, model.repeatPenaltyTokens() },
+        { ModelList::PromptTemplateRole, model.promptTemplate() },
+        { ModelList::SystemPromptRole, model.systemPrompt() },
+    };
+    updateData(id, data);
     return id;
 }
 
@@ -1019,18 +1070,9 @@ void ModelList::removeClone(const ModelInfo &model)
 
 void ModelList::removeInstalled(const ModelInfo &model)
 {
-    // We only remove a model if it is installed and is discovered or sideloaded
-    if (!model.installed || !(model.isDiscovered() || model.description() == "" /*indicates sideloaded*/))
-        return;
-
-    // We shouldn't remove it if a discovered search is in progress or completed because the
-    // clearing of that search will erase it...
-
-    // FIXME: This won't be true in a bit when save the installed portion to settings, then we'll need to
-    // use this... or at least unflag the installed bit...
-    if (m_discoverNumberOfResults)
-        return;
-
+    Q_ASSERT(model.installed);
+    Q_ASSERT(!model.isClone());
+    Q_ASSERT(model.isDiscovered() || model.description() == "" /*indicates sideloaded*/);
     removeInternal(model);
     emit layoutChanged();
 }
@@ -1156,12 +1198,15 @@ void ModelList::updateModelsFromDirectory()
                     }
 
                     for (const QString &id : modelsById) {
-                        updateData(id, InstalledRole, true);
-                        updateData(id, FilenameRole, filename);
-                        // FIXME: WE should change this to use a consistent filename for online models
-                        updateData(id, OnlineRole, filename.startsWith("chatgpt-") || filename.startsWith("nomic-"));
-                        updateData(id, DirpathRole, info.dir().absolutePath() + "/");
-                        updateData(id, FilesizeRole, toFileSize(info.size()));
+                        QVector<QPair<int, QVariant>> data {
+                            { InstalledRole, true },
+                            { FilenameRole, filename },
+                            // FIXME: WE should change this to use a consistent filename for online models
+                            { OnlineRole, filename.startsWith("chatgpt-") || filename.startsWith("nomic-") },
+                            { DirpathRole, info.dir().absolutePath() + "/" },
+                            { FilesizeRole, toFileSize(info.size()) },
+                        };
+                        updateData(id, data);
                     }
                 }
             }
@@ -1359,46 +1404,49 @@ void ModelList::parseModelsJsonFile(const QByteArray &jsonData, bool save)
         if (!contains(id))
             addModel(id);
 
-        updateData(id, ModelList::NameRole, modelName);
-        updateData(id, ModelList::FilenameRole, modelFilename);
-        updateData(id, ModelList::FilesizeRole, modelFilesize);
-        updateData(id, ModelList::HashRole, modelHash);
-        updateData(id, ModelList::HashAlgorithmRole, ModelInfo::Md5);
-        updateData(id, ModelList::DefaultRole, isDefault);
-        updateData(id, ModelList::DescriptionRole, description);
-        updateData(id, ModelList::RequiresVersionRole, requiresVersion);
-        updateData(id, ModelList::VersionRemovedRole, versionRemoved);
-        updateData(id, ModelList::UrlRole, url);
-        updateData(id, ModelList::DisableGUIRole, disableGUI);
-        updateData(id, ModelList::OrderRole, order);
-        updateData(id, ModelList::RamrequiredRole, ramrequired);
-        updateData(id, ModelList::ParametersRole, parameters);
-        updateData(id, ModelList::QuantRole, quant);
-        updateData(id, ModelList::TypeRole, type);
+        QVector<QPair<int, QVariant>> data {
+            { ModelList::NameRole, modelName },
+            { ModelList::FilenameRole, modelFilename },
+            { ModelList::FilesizeRole, modelFilesize },
+            { ModelList::HashRole, modelHash },
+            { ModelList::HashAlgorithmRole, ModelInfo::Md5 },
+            { ModelList::DefaultRole, isDefault },
+            { ModelList::DescriptionRole, description },
+            { ModelList::RequiresVersionRole, requiresVersion },
+            { ModelList::VersionRemovedRole, versionRemoved },
+            { ModelList::UrlRole, url },
+            { ModelList::DisableGUIRole, disableGUI },
+            { ModelList::OrderRole, order },
+            { ModelList::RamrequiredRole, ramrequired },
+            { ModelList::ParametersRole, parameters },
+            { ModelList::QuantRole, quant },
+            { ModelList::TypeRole, type },
+        };
         if (obj.contains("temperature"))
-            updateData(id, ModelList::TemperatureRole, obj["temperature"].toDouble());
+            data.append({ ModelList::TemperatureRole, obj["temperature"].toDouble() });
         if (obj.contains("topP"))
-            updateData(id, ModelList::TopPRole, obj["topP"].toDouble());
+            data.append({ ModelList::TopPRole, obj["topP"].toDouble() });
         if (obj.contains("minP"))
-            updateData(id, ModelList::MinPRole, obj["minP"].toDouble());
+            data.append({ ModelList::MinPRole, obj["minP"].toDouble() });
         if (obj.contains("topK"))
-            updateData(id, ModelList::TopKRole, obj["topK"].toInt());
+            data.append({ ModelList::TopKRole, obj["topK"].toInt() });
         if (obj.contains("maxLength"))
-            updateData(id, ModelList::MaxLengthRole, obj["maxLength"].toInt());
+            data.append({ ModelList::MaxLengthRole, obj["maxLength"].toInt() });
         if (obj.contains("promptBatchSize"))
-            updateData(id, ModelList::PromptBatchSizeRole, obj["promptBatchSize"].toInt());
+            data.append({ ModelList::PromptBatchSizeRole, obj["promptBatchSize"].toInt() });
         if (obj.contains("contextLength"))
-            updateData(id, ModelList::ContextLengthRole, obj["contextLength"].toInt());
+            data.append({ ModelList::ContextLengthRole, obj["contextLength"].toInt() });
         if (obj.contains("gpuLayers"))
-            updateData(id, ModelList::GpuLayersRole, obj["gpuLayers"].toInt());
+            data.append({ ModelList::GpuLayersRole, obj["gpuLayers"].toInt() });
         if (obj.contains("repeatPenalty"))
-            updateData(id, ModelList::RepeatPenaltyRole, obj["repeatPenalty"].toDouble());
+            data.append({ ModelList::RepeatPenaltyRole, obj["repeatPenalty"].toDouble() });
         if (obj.contains("repeatPenaltyTokens"))
-            updateData(id, ModelList::RepeatPenaltyTokensRole, obj["repeatPenaltyTokens"].toInt());
+            data.append({ ModelList::RepeatPenaltyTokensRole, obj["repeatPenaltyTokens"].toInt() });
         if (obj.contains("promptTemplate"))
-            updateData(id, ModelList::PromptTemplateRole, obj["promptTemplate"].toString());
+            data.append({ ModelList::PromptTemplateRole, obj["promptTemplate"].toString() });
         if (obj.contains("systemPrompt"))
-            updateData(id, ModelList::SystemPromptRole, obj["systemPrompt"].toString());
+            data.append({ ModelList::SystemPromptRole, obj["systemPrompt"].toString() });
+        updateData(id, data);
     }
 
     const QString chatGPTDesc = tr("<ul><li>Requires personal OpenAI API key.</li><li>WARNING: Will send"
@@ -1414,18 +1462,21 @@ void ModelList::parseModelsJsonFile(const QByteArray &jsonData, bool save)
             changeId(modelFilename, id);
         if (!contains(id))
             addModel(id);
-        updateData(id, ModelList::NameRole, modelName);
-        updateData(id, ModelList::FilenameRole, modelFilename);
-        updateData(id, ModelList::FilesizeRole, "minimal");
-        updateData(id, ModelList::OnlineRole, true);
-        updateData(id, ModelList::DescriptionRole,
-            tr("<strong>OpenAI's ChatGPT model GPT-3.5 Turbo</strong><br>") + chatGPTDesc);
-        updateData(id, ModelList::RequiresVersionRole, "2.4.2");
-        updateData(id, ModelList::OrderRole, "ca");
-        updateData(id, ModelList::RamrequiredRole, 0);
-        updateData(id, ModelList::ParametersRole, "?");
-        updateData(id, ModelList::QuantRole, "NA");
-        updateData(id, ModelList::TypeRole, "GPT");
+        QVector<QPair<int, QVariant>> data {
+            { ModelList::NameRole, modelName },
+            { ModelList::FilenameRole, modelFilename },
+            { ModelList::FilesizeRole, "minimal" },
+            { ModelList::OnlineRole, true },
+            { ModelList::DescriptionRole,
+             tr("<strong>OpenAI's ChatGPT model GPT-3.5 Turbo</strong><br>") + chatGPTDesc },
+            { ModelList::RequiresVersionRole, "2.4.2" },
+            { ModelList::OrderRole, "ca" },
+            { ModelList::RamrequiredRole, 0 },
+            { ModelList::ParametersRole, "?" },
+            { ModelList::QuantRole, "NA" },
+            { ModelList::TypeRole, "GPT" },
+        };
+        updateData(id, data);
     }
 
     {
@@ -1438,18 +1489,21 @@ void ModelList::parseModelsJsonFile(const QByteArray &jsonData, bool save)
             changeId(modelFilename, id);
         if (!contains(id))
             addModel(id);
-        updateData(id, ModelList::NameRole, modelName);
-        updateData(id, ModelList::FilenameRole, modelFilename);
-        updateData(id, ModelList::FilesizeRole, "minimal");
-        updateData(id, ModelList::OnlineRole, true);
-        updateData(id, ModelList::DescriptionRole,
-            tr("<strong>OpenAI's ChatGPT model GPT-4</strong><br>") + chatGPTDesc + chatGPT4Warn);
-        updateData(id, ModelList::RequiresVersionRole, "2.4.2");
-        updateData(id, ModelList::OrderRole, "cb");
-        updateData(id, ModelList::RamrequiredRole, 0);
-        updateData(id, ModelList::ParametersRole, "?");
-        updateData(id, ModelList::QuantRole, "NA");
-        updateData(id, ModelList::TypeRole, "GPT");
+        QVector<QPair<int, QVariant>> data {
+            { ModelList::NameRole, modelName },
+            { ModelList::FilenameRole, modelFilename },
+            { ModelList::FilesizeRole, "minimal" },
+            { ModelList::OnlineRole, true },
+            { ModelList::DescriptionRole,
+             tr("<strong>OpenAI's ChatGPT model GPT-4</strong><br>") + chatGPTDesc + chatGPT4Warn },
+            { ModelList::RequiresVersionRole, "2.4.2" },
+            { ModelList::OrderRole, "cb" },
+            { ModelList::RamrequiredRole, 0 },
+            { ModelList::ParametersRole, "?" },
+            { ModelList::QuantRole, "NA" },
+            { ModelList::TypeRole, "GPT" },
+        };
+        updateData(id, data);
     }
 
     {
@@ -1465,35 +1519,41 @@ void ModelList::parseModelsJsonFile(const QByteArray &jsonData, bool save)
             changeId(modelFilename, id);
         if (!contains(id))
             addModel(id);
-        updateData(id, ModelList::NameRole, modelName);
-        updateData(id, ModelList::FilenameRole, modelFilename);
-        updateData(id, ModelList::FilesizeRole, "minimal");
-        updateData(id, ModelList::OnlineRole, true);
-        updateData(id, ModelList::DisableGUIRole, true);
-        updateData(id, ModelList::DescriptionRole,
-            tr("<strong>LocalDocs Nomic Atlas Embed</strong><br>") + nomicEmbedDesc);
-        updateData(id, ModelList::RequiresVersionRole, "2.6.3");
-        updateData(id, ModelList::OrderRole, "na");
-        updateData(id, ModelList::RamrequiredRole, 0);
-        updateData(id, ModelList::ParametersRole, "?");
-        updateData(id, ModelList::QuantRole, "NA");
-        updateData(id, ModelList::TypeRole, "Bert");
+        QVector<QPair<int, QVariant>> data {
+            { ModelList::NameRole, modelName },
+            { ModelList::FilenameRole, modelFilename },
+            { ModelList::FilesizeRole, "minimal" },
+            { ModelList::OnlineRole, true },
+            { ModelList::DisableGUIRole, true },
+            { ModelList::DescriptionRole,
+             tr("<strong>LocalDocs Nomic Atlas Embed</strong><br>") + nomicEmbedDesc },
+            { ModelList::RequiresVersionRole, "2.6.3" },
+            { ModelList::OrderRole, "na" },
+            { ModelList::RamrequiredRole, 0 },
+            { ModelList::ParametersRole, "?" },
+            { ModelList::QuantRole, "NA" },
+            { ModelList::TypeRole, "Bert" },
+        };
+        updateData(id, data);
     }
 }
 
 void ModelList::updateDiscoveredInstalled(const ModelInfo &info)
 {
-    updateData(info.id(), ModelList::InstalledRole, true);
-    updateData(info.id(), ModelList::IsDiscoveredRole, true);
-    updateData(info.id(), ModelList::NameRole, info.name());
-    updateData(info.id(), ModelList::FilenameRole, info.filename());
-    updateData(info.id(), ModelList::DescriptionRole, info.description());
-    updateData(info.id(), ModelList::UrlRole, info.url());
-    updateData(info.id(), ModelList::LikesRole, info.likes());
-    updateData(info.id(), ModelList::DownloadsRole, info.downloads());
-    updateData(info.id(), ModelList::RecencyRole, info.recency());
-    updateData(info.id(), ModelList::QuantRole, info.quant());
-    updateData(info.id(), ModelList::TypeRole, info.type());
+    QVector<QPair<int, QVariant>> data {
+        { ModelList::InstalledRole, true },
+        { ModelList::IsDiscoveredRole, true },
+        { ModelList::NameRole, info.name() },
+        { ModelList::FilenameRole, info.filename() },
+        { ModelList::DescriptionRole, info.description() },
+        { ModelList::UrlRole, info.url() },
+        { ModelList::LikesRole, info.likes() },
+        { ModelList::DownloadsRole, info.downloads() },
+        { ModelList::RecencyRole, info.recency() },
+        { ModelList::QuantRole, info.quant() },
+        { ModelList::TypeRole, info.type() },
+    };
+    updateData(info.id(), data);
 }
 
 void ModelList::updateModelsFromSettings()
@@ -1511,98 +1571,100 @@ void ModelList::updateModelsFromSettings()
 
         addModel(id);
 
+        QVector<QPair<int, QVariant>> data;
         if (settings.contains(g + "/name")) {
             const QString name = settings.value(g + "/name").toString();
-            updateData(id, ModelList::NameRole, name);
+            data.append({ ModelList::NameRole, name });
         }
         if (settings.contains(g + "/filename")) {
             const QString filename = settings.value(g + "/filename").toString();
-            updateData(id, ModelList::FilenameRole, filename);
+            data.append({ ModelList::FilenameRole, filename });
         }
         if (settings.contains(g + "/description")) {
             const QString d = settings.value(g + "/description").toString();
-            updateData(id, ModelList::DescriptionRole, d);
+            data.append({ ModelList::DescriptionRole, d });
         }
         if (settings.contains(g + "/url")) {
             const QString u = settings.value(g + "/url").toString();
-            updateData(id, ModelList::UrlRole, u);
+            data.append({ ModelList::UrlRole, u });
         }
         if (settings.contains(g + "/quant")) {
             const QString q = settings.value(g + "/quant").toString();
-            updateData(id, ModelList::QuantRole, q);
+            data.append({ ModelList::QuantRole, q });
         }
         if (settings.contains(g + "/type")) {
             const QString t = settings.value(g + "/type").toString();
-            updateData(id, ModelList::TypeRole, t);
+            data.append({ ModelList::TypeRole, t });
         }
         if (settings.contains(g + "/isClone")) {
             const bool b = settings.value(g + "/isClone").toBool();
-            updateData(id, ModelList::IsCloneRole, b);
+            data.append({ ModelList::IsCloneRole, b });
         }
         if (settings.contains(g + "/isDiscovered")) {
             const bool b = settings.value(g + "/isDiscovered").toBool();
-            updateData(id, ModelList::IsDiscoveredRole, b);
+            data.append({ ModelList::IsDiscoveredRole, b });
         }
         if (settings.contains(g + "/likes")) {
             const int l = settings.value(g + "/likes").toInt();
-            updateData(id, ModelList::LikesRole, l);
+            data.append({ ModelList::LikesRole, l });
         }
         if (settings.contains(g + "/downloads")) {
             const int d = settings.value(g + "/downloads").toInt();
-            updateData(id, ModelList::DownloadsRole, d);
+            data.append({ ModelList::DownloadsRole, d });
         }
         if (settings.contains(g + "/recency")) {
             const QDateTime r = settings.value(g + "/recency").toDateTime();
-            updateData(id, ModelList::RecencyRole, r);
+            data.append({ ModelList::RecencyRole, r });
         }
         if (settings.contains(g + "/temperature")) {
             const double temperature = settings.value(g + "/temperature").toDouble();
-            updateData(id, ModelList::TemperatureRole, temperature);
+            data.append({ ModelList::TemperatureRole, temperature });
         }
         if (settings.contains(g + "/topP")) {
             const double topP = settings.value(g + "/topP").toDouble();
-            updateData(id, ModelList::TopPRole, topP);
+            data.append({ ModelList::TopPRole, topP });
         }
         if (settings.contains(g + "/minP")) {
             const double minP = settings.value(g + "/minP").toDouble();
-            updateData(id, ModelList::MinPRole, minP);
+            data.append({ ModelList::MinPRole, minP });
         }
         if (settings.contains(g + "/topK")) {
             const int topK = settings.value(g + "/topK").toInt();
-            updateData(id, ModelList::TopKRole, topK);
+            data.append({ ModelList::TopKRole, topK });
         }
         if (settings.contains(g + "/maxLength")) {
             const int maxLength = settings.value(g + "/maxLength").toInt();
-            updateData(id, ModelList::MaxLengthRole, maxLength);
+            data.append({ ModelList::MaxLengthRole, maxLength });
         }
         if (settings.contains(g + "/promptBatchSize")) {
             const int promptBatchSize = settings.value(g + "/promptBatchSize").toInt();
-            updateData(id, ModelList::PromptBatchSizeRole, promptBatchSize);
+            data.append({ ModelList::PromptBatchSizeRole, promptBatchSize });
         }
         if (settings.contains(g + "/contextLength")) {
             const int contextLength = settings.value(g + "/contextLength").toInt();
-            updateData(id, ModelList::ContextLengthRole, contextLength);
+            data.append({ ModelList::ContextLengthRole, contextLength });
         }
         if (settings.contains(g + "/gpuLayers")) {
             const int gpuLayers = settings.value(g + "/gpuLayers").toInt();
-            updateData(id, ModelList::GpuLayersRole, gpuLayers);
+            data.append({ ModelList::GpuLayersRole, gpuLayers });
         }
         if (settings.contains(g + "/repeatPenalty")) {
             const double repeatPenalty = settings.value(g + "/repeatPenalty").toDouble();
-            updateData(id, ModelList::RepeatPenaltyRole, repeatPenalty);
+            data.append({ ModelList::RepeatPenaltyRole, repeatPenalty });
         }
         if (settings.contains(g + "/repeatPenaltyTokens")) {
             const int repeatPenaltyTokens = settings.value(g + "/repeatPenaltyTokens").toInt();
-            updateData(id, ModelList::RepeatPenaltyTokensRole, repeatPenaltyTokens);
+            data.append({ ModelList::RepeatPenaltyTokensRole, repeatPenaltyTokens });
         }
         if (settings.contains(g + "/promptTemplate")) {
             const QString promptTemplate = settings.value(g + "/promptTemplate").toString();
-            updateData(id, ModelList::PromptTemplateRole, promptTemplate);
+            data.append({ ModelList::PromptTemplateRole, promptTemplate });
         }
         if (settings.contains(g + "/systemPrompt")) {
             const QString systemPrompt = settings.value(g + "/systemPrompt").toString();
-            updateData(id, ModelList::SystemPromptRole, systemPrompt);
+            data.append({ ModelList::SystemPromptRole, systemPrompt });
         }
+        updateData(id, data);
     }
 }
 
@@ -1799,7 +1861,7 @@ void ModelList::parseDiscoveryJsonFile(const QByteArray &jsonData)
 
             QuantType quant = toQuantType(filename);
             if (quant != Unknown)
-                filteredAndSortedFilenames.append(qMakePair(quant, filename));
+                filteredAndSortedFilenames.append({ quant, filename });
         }
 
         if (filteredAndSortedFilenames.isEmpty())
@@ -1889,20 +1951,21 @@ void ModelList::handleDiscoveryItemFinished()
     if (!contains(id))
         addModel(id);
 
-    QVector<QPair<int, QVariant>> data;
-    data.append(qMakePair(ModelList::NameRole, modelName));
-    data.append(qMakePair(ModelList::FilenameRole, modelFilename));
-    data.append(qMakePair(ModelList::FilesizeRole, modelFilesize));
-    data.append(qMakePair(ModelList::DescriptionRole, description));
-    data.append(qMakePair(ModelList::IsDiscoveredRole, true));
-    data.append(qMakePair(ModelList::UrlRole, url));
-    data.append(qMakePair(ModelList::LikesRole, likes));
-    data.append(qMakePair(ModelList::DownloadsRole, downloads));
-    data.append(qMakePair(ModelList::RecencyRole, lastModified));
-    data.append(qMakePair(ModelList::QuantRole, toQuantString(modelFilename)));
-    data.append(qMakePair(ModelList::TypeRole, type));
-    data.append(qMakePair(ModelList::HashRole, linkedEtagHeader));
-    data.append(qMakePair(ModelList::HashAlgorithmRole, ModelInfo::Sha256));
+    QVector<QPair<int, QVariant>> data {
+        { ModelList::NameRole, modelName },
+        { ModelList::FilenameRole, modelFilename },
+        { ModelList::FilesizeRole, modelFilesize },
+        { ModelList::DescriptionRole, description },
+        { ModelList::IsDiscoveredRole, true },
+        { ModelList::UrlRole, url },
+        { ModelList::LikesRole, likes },
+        { ModelList::DownloadsRole, downloads },
+        { ModelList::RecencyRole, lastModified },
+        { ModelList::QuantRole, toQuantString(modelFilename) },
+        { ModelList::TypeRole, type },
+        { ModelList::HashRole, linkedEtagHeader },
+        { ModelList::HashAlgorithmRole, ModelInfo::Sha256 },
+    };
     updateData(id, data);
 
     ++m_discoverResultsCompleted;
